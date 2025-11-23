@@ -1,6 +1,6 @@
 import random
 import hashlib
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from datetime import datetime
 
 from app.schemas.scoring import ScoringRequest, ScoringResult, ScoringStatus, ScoringConfig
@@ -10,17 +10,21 @@ class ScoringEngine:
         self.config = config or ScoringConfig()
     
     def calculate_score(self, request: ScoringRequest) -> Dict[str, Any]:
-        """Расчет скорингового балла с детальными факторами"""
-        base_score = 500  # Базовый балл
+        """Расчет скорингового балла с учетом зарплаты"""
+        base_score = 500
         
-        # Детальные факторы оценки
         factors = {
             'loan_amount_ratio': self._calculate_amount_ratio(request.loan_amount),
             'loan_term_ratio': self._calculate_term_ratio(request.loan_term),
             'passport_risk': self._calculate_passport_risk(request.passport_number),
             'inn_risk': self._calculate_inn_risk(request.inn),
             'application_risk': self._calculate_application_risk(request.application_id),
-            'income_sufficiency': self._calculate_income_sufficiency(request.loan_amount, request.loan_term)
+            'income_sufficiency': self._calculate_income_sufficiency(
+                request.loan_amount, 
+                request.loan_term, 
+                request.user_salary
+            ),
+            'salary_stability': self._calculate_salary_stability(request.user_salary)
         }
         
         # Применяем веса
@@ -49,7 +53,7 @@ class ScoringEngine:
         return {
             'score': final_score,
             'details': score_details,
-            'risk_factors': self._identify_risk_factors(factors, final_score)
+            'risk_factors': self._identify_risk_factors(factors, final_score, request.user_salary)
         }
     
     def _calculate_amount_ratio(self, amount: float) -> tuple:
@@ -105,33 +109,64 @@ class ScoringEngine:
         else:
             return risk_score, "Заявка: стандартный риск"
     
-    def _calculate_income_sufficiency(self, amount: float, term: int) -> tuple:
-        """Оценка достаточности дохода"""
-        monthly_payment = amount / term if term > 0 else 0
-        income_sufficiency_ratio = monthly_payment / 50000  # Предполагаемый средний доход
-        
-        if income_sufficiency_ratio < 0.3:
-            return 30, "Низкая доля платежа в доходе"
-        elif income_sufficiency_ratio < 0.5:
-            return 10, "Умеренная доля платежа в доходе"
-        elif income_sufficiency_ratio < 0.7:
-            return -10, "Высокая доля платежа в доходе"
+    def _calculate_income_sufficiency(self, amount: float, term: int, salary: Optional[float]) -> tuple:
+        """Оценка достаточности дохода с учетом реальной зарплаты"""
+        if not salary or salary <= 0:
+            # Если зарплата не указана, используем консервативную оценку
+            monthly_payment = amount / term if term > 0 else 0
+            income_sufficiency_ratio = monthly_payment / 50000  # Предполагаемый средний доход
+            
+            if income_sufficiency_ratio < 0.3:
+                return 20, "Низкая доля платежа в доходе (зарплата не указана)"
+            elif income_sufficiency_ratio < 0.5:
+                return 5, "Умеренная доля платежа в доходе (зарплата не указана)"
+            elif income_sufficiency_ratio < 0.7:
+                return -15, "Высокая доля платежа в доходе (зарплата не указана)"
+            else:
+                return -35, "Очень высокая доля платежа в доходе (зарплата не указана)"
         else:
-            return -30, "Очень высокая доля платежа в доходе"
+            # Расчет на основе реальной зарплаты
+            monthly_payment = amount / term if term > 0 else 0
+            income_sufficiency_ratio = monthly_payment / float(salary)
+            
+            if income_sufficiency_ratio < 0.2:
+                return 40, "Отличное соотношение платежа к доходу"
+            elif income_sufficiency_ratio < 0.35:
+                return 25, "Хорошее соотношение платежа к доходу"
+            elif income_sufficiency_ratio < 0.5:
+                return 10, "Удовлетворительное соотношение платежа к доходу"
+            elif income_sufficiency_ratio < 0.65:
+                return -10, "Повышенная доля платежа в доходе"
+            else:
+                return -30, "Критическая доля платежа в доходе"
+    
+    def _calculate_salary_stability(self, salary: Optional[float]) -> tuple:
+        """Оценка стабильности дохода"""
+        if not salary or salary <= 0:
+            return -20, "Зарплата не указана - повышенный риск"
+        elif salary < 30000:
+            return -10, "Низкий уровень дохода"
+        elif salary < 70000:
+            return 10, "Средний уровень дохода"
+        elif salary < 150000:
+            return 25, "Высокий уровень дохода"
+        else:
+            return 35, "Очень высокий уровень дохода"
     
     def _get_factor_weight(self, factor_name: str) -> float:
         """Веса факторов"""
         weights = {
             'loan_amount_ratio': 2.0,
             'loan_term_ratio': 1.5,
-            'income_sufficiency': 2.5,
+            'income_sufficiency': 2.5,  # ✅ Повышенный вес для дохода
+            'salary_stability': 1.8,    # ✅ Новый вес для стабильности зарплаты
             'passport_risk': 1.2,
             'inn_risk': 1.0,
             'application_risk': 0.8
         }
         return weights.get(factor_name, 1.0)
     
-    def _identify_risk_factors(self, factors: Dict[str, tuple], score: int) -> List[Dict[str, Any]]:
+    def _identify_risk_factors(self, factors: Dict[str, tuple], score: int, salary: Optional[float]) -> List[Dict[str, Any]]:
         """Идентификация ключевых факторов риска"""
         risk_factors = []
         
@@ -151,13 +186,21 @@ class ScoringEngine:
                     'impact': factor_score
                 })
         
-        # Дополнительные риски на основе общего балла
+        # Дополнительные риски на основе общего балла и зарплаты
         if score < 500:
             risk_factors.append({
                 'factor': 'overall_score',
                 'severity': 'high',
                 'description': 'Общий кредитный рейтинг слишком низкий',
                 'impact': -50
+            })
+        
+        if not salary or salary <= 0:
+            risk_factors.append({
+                'factor': 'salary_missing',
+                'severity': 'medium',
+                'description': 'Зарплата не указана - невозможно оценить платежеспособность',
+                'impact': -20
             })
         
         return risk_factors
@@ -203,8 +246,9 @@ class ScoringEngine:
                 "score_details": scoring_result['details'],
                 "risk_factors": scoring_result['risk_factors'],
                 "rejection_reasons": rejection_reasons,
+                "user_salary_used": request.user_salary if request.user_salary else "не указана",
                 "decision_timestamp": datetime.utcnow().isoformat(),
-                "recommendations": self._get_recommendations(scoring_result, status)
+                "recommendations": self._get_recommendations(scoring_result, status, request.user_salary)
             }
         )
         
@@ -222,7 +266,13 @@ class ScoringEngine:
         
         interest_rate = self._calculate_interest_rate(score, approved_term)
         monthly_payment = self._calculate_monthly_payment(approved_amount, interest_rate, approved_term)
-        insurance_required = approved_amount > 500000 or score < 700
+        
+        # Страховка требуется для высоких сумм или низкого скоринга
+        insurance_required = (
+            approved_amount > 500000 or 
+            score < 700 or 
+            (request.user_salary and request.user_salary < 50000)
+        )
         
         return {
             'approved_amount': approved_amount,
@@ -252,6 +302,8 @@ class ScoringEngine:
         for risk_factor in high_risk_factors:
             if risk_factor['factor'] == 'income_sufficiency':
                 reasons.append("Недостаточный уровень дохода для запрашиваемой суммы")
+            elif risk_factor['factor'] == 'salary_missing':
+                reasons.append("Не указана зарплата - невозможно оценить платежеспособность")
             elif risk_factor['factor'] == 'loan_amount_ratio':
                 reasons.append("Запрашиваемая сумма превышает допустимые лимиты")
             elif risk_factor['factor'] == 'overall_score':
@@ -262,6 +314,8 @@ class ScoringEngine:
                 reasons.append("Запрашиваемый срок кредита несет повышенные риски")
             elif risk_factor['factor'] == 'passport_risk':
                 reasons.append("Требуется дополнительная проверка паспортных данных")
+            elif risk_factor['factor'] == 'salary_stability':
+                reasons.append("Уровень дохода недостаточен для комфортного обслуживания кредита")
         
         # Если причины не найдены, добавляем общие
         if not reasons:
@@ -272,8 +326,8 @@ class ScoringEngine:
         
         return reasons
     
-    def _get_recommendations(self, scoring_result: Dict[str, Any], status: ScoringStatus) -> List[str]:
-        """Рекомендации для заявителя"""
+    def _get_recommendations(self, scoring_result: Dict[str, Any], status: ScoringStatus, user_salary: Optional[float]) -> List[str]:
+        """Рекомендации для заявителя с учетом зарплаты"""
         recommendations = []
         score = scoring_result['score']
         risk_factors = scoring_result['risk_factors']
@@ -283,14 +337,21 @@ class ScoringEngine:
                 recommendations.append("Рекомендуем обратиться за кредитом с меньшей суммой")
                 recommendations.append("Рассмотрите возможность увеличения срока кредита")
             
+            if not user_salary:
+                recommendations.append("Укажите вашу зарплату для более точной оценки платежеспособности")
+            
             high_risk_factors = [f for f in risk_factors if f['severity'] == 'high']
             for risk_factor in high_risk_factors:
                 if risk_factor['factor'] == 'income_sufficiency':
                     recommendations.append("Предоставьте документы, подтверждающие дополнительный доход")
+                elif risk_factor['factor'] == 'salary_missing':
+                    recommendations.append("Укажите вашу зарплату в личном кабинете")
         
         elif status == ScoringStatus.MANUAL_REVIEW:
             recommendations.append("Подготовьте дополнительные документы, подтверждающие доход")
             recommendations.append("Будьте готовы к звонку от кредитного специалиста")
+            if not user_salary:
+                recommendations.append("Рекомендуем указать зарплату для ускорения проверки")
         
         elif status == ScoringStatus.APPROVED:
             if scoring_result['details']['risk_level'] == 'MEDIUM':

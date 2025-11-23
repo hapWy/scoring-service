@@ -15,6 +15,7 @@ class ScoringRequest(BaseModel):
     passport_number: str = Field(..., pattern=r'^\d{10}$')
     loan_amount: float = Field(..., gt=0)
     loan_term: int = Field(..., gt=0)
+    user_salary: Optional[float] = Field(None, ge=0)  # ✅ Добавляем зарплату
 
 class ScoringResult(BaseModel):
     application_id: int
